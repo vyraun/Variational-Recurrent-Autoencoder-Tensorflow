@@ -75,13 +75,13 @@ def _group_sentences_into_batches(data, batch_size):
 def _to_batch_major(data):
   return [np.array(sent_list).transpose() for sent_list in data]
 
-def _get_data_from_path(data_path, word_to_id, batch_size):
+def _get_data_from_path(data_path, word_to_id):
   data = _file_to_word_ids(data_path, word_to_id)[:-1]
-  data = _group_sentences_into_batches(data, batch_size)
-  data = _to_batch_major(data)
+  #data = _group_sentences_into_batches(data, batch_size)
+  #data = _to_batch_major(data)
   return data
 
-def ptb_raw_data(data_path, batch_size):
+def ptb_raw_data(data_path):
   """Load PTB raw data from data directory "data_path".
 
   Reads PTB text files, converts strings to integer ids,
@@ -106,9 +106,9 @@ def ptb_raw_data(data_path, batch_size):
 
   word_to_id = _build_vocab(train_path)
   print(word_to_id)
-  train_data = _get_data_from_path(train_path, word_to_id, batch_size)
-  valid_data = _get_data_from_path(valid_path, word_to_id, batch_size)
-  test_data = _get_data_from_path(test_path, word_to_id, batch_size)
+  train_data = _get_data_from_path(train_path, word_to_id)
+  valid_data = _get_data_from_path(valid_path, word_to_id)
+  test_data = _get_data_from_path(test_path, word_to_id)
   vocabulary = len(word_to_id)
   return train_data, valid_data, test_data, vocabulary
 
