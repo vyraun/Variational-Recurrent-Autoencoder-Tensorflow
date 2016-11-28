@@ -32,8 +32,8 @@ class PTBInput(object):
 
   def __init__(self, config, data, name=None):
     self.batch_size = batch_size = config.batch_size
-    self.input_data, self.targets = reader.ptb_producer(
-        data, batch_size, num_steps, name=name)
+    self.input_data = reader.ptb_producer(
+        data, batch_size)
 
 
 class SmallConfig(object):
@@ -118,11 +118,6 @@ def run_epoch(session, model, eval_op=None, verbose=False):
     fetches["eval_op"] = eval_op
 
   for step in range(model.input.epoch_size):
-    feed_dict = {}
-    for i, (c, h) in enumerate(model.initial_state):
-      feed_dict[c] = state[i].c
-      feed_dict[h] = state[i].h
-
     vals = session.run(fetches)
     cost = vals["cost"]
     state = vals["final_state"]
@@ -172,7 +167,6 @@ def main(_):
       with tf.variable_scope("Model", reuse=None, initializer=initializer):
         m = VRAE(is_training=True, config=config, input_=train_input)
       tf.scalar_summary("Training Loss", m.cost)
-      tf.scalar_summary("Learning Rate", m.lr)
 
     with tf.name_scope("Valid"):
       valid_input = PTBInput(config=config, data=valid_data, name="ValidInput")
@@ -189,7 +183,6 @@ def main(_):
     sv = tf.train.Supervisor(logdir=FLAGS.save_path)
     with sv.managed_session() as session:
       for i in range(config.max_max_epoch):
-        lr_decay = config.lr_decay ** max(i + 1 - config.max_epoch, 0.0)
         m.assign_lr(session, config.learning_rate * lr_decay)
 
         print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))

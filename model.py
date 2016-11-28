@@ -13,8 +13,6 @@ def data_type():
   return tf.float16 if FLAGS.use_fp16 else tf.float32
 
 
-
-
 class VRAE(object):
 
   def __init__(
@@ -25,38 +23,33 @@ class VRAE(object):
 
     self._input = input_
     self._is_training = is_training
-    self._batch_size = batch_size = _input.batch_size
-    self._seq_len = _input.seq_len
+
 
     for key in config:
       setattr(self, '_' + key, config[key])
 
-    input_data = tf.placeholder(tf.int32,
-      [self._batch_size, self._seq_len])
+    input_data = self._input.input_data
+    self._batch_size, self._seq_len = input_data.shape
+    input_data = tf.convert_to_tensor(input_data,
+      name="input_data", dtype=data_type())
     with tf.variable_scope("enc"):
       enc_mean, enc_stddev = encoder(input_data)
     with tf.variable_scope('dec'):
       outputs = decoder(enc_mean, enc_stddev)
 
-    loss = get_KL_term(enc_mean, enc_stddev) + get_reconstruction_cost(
-      outputs, input_data)
-    self._cost = cost = loss / self._batch_size
+    num_unit_loss = self._seq_len * self._batch_size
+    loss = (self._KL_rate * get_KL_term(enc_mean, enc_stddev) +
+    get_reconstruction_cost(outputs, input_data))/num_unit_loss
+    self._cost = cost = loss
 
     if not self._is_training:
       return
 
-    self._lr = tf.Variable(0.0, trainable=False)
     tvars = tf.trainable_variables()
     grads, _ = tf.clip_by_global_norm(tf.gradients(cost, tvars),
                                       self._max_grad_norm)
-    optimizer = tf.train.GradientDescentOptimizer(self._lr)
-    self._train_op = optimizer.apply_gradients(
-        zip(grads, tvars),
-        global_step=tf.contrib.framework.get_or_create_global_step())
-
-    self._new_lr = tf.placeholder(
-        tf.float32, shape=[], name="new_learning_rate")
-    self._lr_update = tf.assign(self._lr, self._new_lr)
+    self._optimizer = tf.train.GradientDescentOptimizer(self._learning_rate)
+    .minimize(loss)
 
   def get_KL_term(self, mean, stddev, epsilon=1e-8):
     '''KL_divergence
@@ -163,13 +156,18 @@ class VRAE(object):
 
     with tf.variable_scope("RNN"): #an RNNLM
       state = dec_initial_state
-      initial_input = tf.zeros([self._batch_size, self._dec_dim])
-      cell_output = initial_input
+      vocab_input = tf.zeros([self._batch_size, self._vocab_size])
       for time_step in range(self._seq_len):
         if time_step > 0:
           tf.get_variable_scope().reuse_variables()
-        #cell_output being zero tensor in the first iteration
-        (cell_output, state) = cell(cell_output, state)
+        input_embedding = tf.get_variable("input_embedding",
+          [self._vocab_size, self._enc_dim])
+        cell_input = tf.matmul(vocab_input, input_embedding)
+        (cell_output, state) = cell(cell_input, state)
+        output_embedding = tf.get_variable("output_embedding",
+          [self._enc_dim, self._vocab_size])
+        vocab_output = tf.matmul(cell_output, output_embebding)
+        #vocab_output = argmax(vocab_output)
         outputs.append(cell_output)
 
     outputs = tf.reshape(tf.concat(1, outputs),

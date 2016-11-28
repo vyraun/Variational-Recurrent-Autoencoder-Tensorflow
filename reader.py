@@ -22,6 +22,8 @@ from __future__ import print_function
 import collections
 import os
 
+from random import shuffle
+
 import numpy as np
 import tensorflow as tf
 
@@ -58,7 +60,7 @@ def _file_to_word_ids(filename, word_to_id):
   data = _read_words_to_list_of_sentences(filename)
   return [[word_to_id[word] for word in sentence] for sentence in data]
 
-def _group_sentences_into_batches(data, batch_size):
+def _group_sentences_into_batches(data, batch_size, shuffle=True):
   len_sentence_list = [len(s) for s in data]
   len_sentence_list = list(set(len_sentence_list))
   sent_lists_grouped_by_len = {seq_len: [] for seq_len in len_sentence_list}
@@ -66,14 +68,13 @@ def _group_sentences_into_batches(data, batch_size):
     sent_lists_grouped_by_len[len(sent)].append(sent)
   batch_sized_sent_list = []
   for seq_len, sent_list in sent_lists_grouped_by_len.iteritems():
+    if shuffle:
+      shuffle(sent_list)
     idx = 0
     while idx < len(sent_list):
       batch_sized_sent_list.append(sent_list[idx:(idx+batch_size)])
       idx += batch_size
   return batch_sized_sent_list
-
-def _to_batch_major(data):
-  return [np.array(sent_list).transpose() for sent_list in data]
 
 def _get_data_from_path(data_path, word_to_id):
   data = _file_to_word_ids(data_path, word_to_id)[:-1]
@@ -113,7 +114,7 @@ def ptb_raw_data(data_path):
   return train_data, valid_data, test_data, vocabulary
 
 
-def ptb_iterator(raw_data, batch_size, num_steps):
+def ptb_producer(data, batch_size, shuffle=True):
   """Iterate on the raw PTB data.
 
   This generates batch_size pointers into the raw PTB data, and allows
@@ -132,20 +133,11 @@ def ptb_iterator(raw_data, batch_size, num_steps):
   Raises:
     ValueError: if batch_size or num_steps are too high.
   """
-  raw_data = np.array(raw_data, dtype=np.int32)
+  data = _group_sentences_into_batches(data, batch_size, shuffle=shuffle)
+  if shuffle:
+    shuffle(data)
+  data = [np.array(sent_list) for sent_list in data]
 
-  data_len = len(raw_data)
-  batch_len = data_len // batch_size
-  data = np.zeros([batch_size, batch_len], dtype=np.int32)
-  for i in range(batch_size):
-    data[i] = raw_data[batch_len * i:batch_len * (i + 1)]
+  for data_in_batch in data:
+    yield data_in_batch
 
-  epoch_size = (batch_len - 1) // num_steps
-
-  if epoch_size == 0:
-    raise ValueError("epoch_size == 0, decrease batch_size or num_steps")
-
-  for i in range(epoch_size):
-    x = data[:, i*num_steps:(i+1)*num_steps]
-    y = data[:, i*num_steps+1:(i+1)*num_steps+1]
-    yield (x, y)
