@@ -52,8 +52,12 @@ def _build_vocab(filename):
   words, _ = list(zip(*count_pairs))
   words = _START_VOCAB + words
   word_to_id = dict(zip(words, range(len(words))))
+  if sys.version_info <= (2,7):
+    id_to_word = {v: k for k, v in word_to_id.iteritems()}
+  else:
+    id_to_word = {v: k for k, v in word_to_id.items()}
 
-  return word_to_id
+  return word_to_id, id_to_word
 
 
 def _file_to_word_ids(filename, word_to_id):
@@ -105,13 +109,12 @@ def ptb_raw_data(data_path):
   valid_path = os.path.join(data_path, "ptb.valid.txt")
   test_path = os.path.join(data_path, "ptb.test.txt")
 
-  word_to_id = _build_vocab(train_path)
-  print(word_to_id)
+  word_to_id, id_to_word = _build_vocab(train_path)
   train_data = _get_data_from_path(train_path, word_to_id)
   valid_data = _get_data_from_path(valid_path, word_to_id)
   test_data = _get_data_from_path(test_path, word_to_id)
   vocabulary = len(word_to_id)
-  return train_data, valid_data, test_data, vocabulary
+  return train_data, valid_data, test_data, word_to_id, id_to_word
 
 
 def ptb_producer(data, batch_size, shuffle=True):
@@ -138,6 +141,5 @@ def ptb_producer(data, batch_size, shuffle=True):
     shuffle(data)
   data = [np.array(sent_list) for sent_list in data]
 
-  for data_in_batch in data:
-    yield data_in_batch
+  return data
 

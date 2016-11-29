@@ -18,28 +18,20 @@ logging = tf.logging
 flags.DEFINE_string(
     "model", "small",
     "A type of model. Possible options are: small, medium, large.")
-flags.DEFINE_string("data_path", None,
+flags.DEFINE_string("data_path", "ptb",
                     "Where the training/test data is stored.")
-flags.DEFINE_string("save_path", None,
+flags.DEFINE_string("save_path", "models",
                     "Model output directory.")
 flags.DEFINE_bool("use_fp16", False,
                   "Train using 16-bit floats instead of 32bit floats")
 
 FLAGS = flags.FLAGS
 
-class PTBInput(object):
-  """The input data."""
-
-  def __init__(self, config, data, name=None):
-    self.batch_size = batch_size = config.batch_size
-    self.input_data = reader.ptb_producer(
-        data, batch_size)
-
 
 class SmallConfig(object):
   """Small config."""
   init_scale = 0.1
-  learning_rate = 1.0
+  learning_rate = 0.001
   max_grad_norm = 5
   num_layers = 2
   num_steps = 20
@@ -55,7 +47,7 @@ class SmallConfig(object):
 class MediumConfig(object):
   """Medium config."""
   init_scale = 0.05
-  learning_rate = 1.0
+  learning_rate = 0.001
   max_grad_norm = 5
   enc_num_layers = 2
   enc_dim = 512
@@ -74,7 +66,7 @@ class MediumConfig(object):
 class LargeConfig(object):
   """Large config."""
   init_scale = 0.04
-  learning_rate = 1.0
+  learning_rate = 0.001
   max_grad_norm = 10
   num_layers = 2
   num_steps = 35
@@ -103,34 +95,52 @@ class TestConfig(object):
   vocab_size = 10000
 
 
-def run_epoch(session, model, eval_op=None, verbose=False):
+def run_epoch(session, model, data):
   """Runs the model on the given data."""
   start_time = time.time()
   costs = 0.0
-  iters = 0
-  state = session.run(model.initial_state)
+  KL_terms = 0.0
+  reconstruction_costs = 0.0
 
   fetches = {
+      "KL_term": model.KL_term,
+      "reconstruction_cost": model.reconstruction_cost,
       "cost": model.cost,
-      "final_state": model.final_state,
   }
-  if eval_op is not None:
-    fetches["eval_op"] = eval_op
+  if model.is_training:
+    fetches["optimizer"] = model.optimizer
 
-  for step in range(model.input.epoch_size):
-    vals = session.run(fetches)
+  for batch in data:
+    batch_size, seq_len = batch.shape
+    feed_dict = {batch_size:batch_size, seq_len: seq_len,
+      input_data: batch}
+    vals = session.run(fetches, feed_dict=feed_dict)
+    KL_term = vals["KL_term"]
+    reconstruction_cost = vals["reconstruction_cost"]
     cost = vals["cost"]
-    state = vals["final_state"]
-
     costs += cost
-    iters += model.input.num_steps
+    KL_terms += KL_term
+    reconstruction_costs = reconstruction_cost
 
-    if verbose and step % (model.input.epoch_size // 10) == 10:
-      print("%.3f perplexity: %.3f speed: %.0f wps" %
-            (step * 1.0 / model.input.epoch_size, np.exp(costs / iters),
-             iters * model.input.batch_size / (time.time() - start_time)))
+  return costs, KL_terms, reconstruction_costs
 
-  return np.exp(costs / iters)
+def sampling(session, model, id_to_word):
+  outputs = model.generate(session)
+  outputs = np.transpose(outputs)
+  outputs = outputs.tolist()
+  outputs = [[id_to_word[word] for word in sentence] for sentence in outputs]
+  return outputs
+
+def reconstruct(session, model, outputs, word_to_id, id_to_word):
+  inputs = [[word_to_id[word] for word in sentence] for sentence in inputs]
+  input_data = tf.convert_to_tensor(inputs)
+  input_data = np.transpose(input_data)
+  outputs = model.reconstruct(session, input_data)
+  outputs = np.transpose(outputs)
+  outputs = outputs.tolist()
+  outputs = [[id_to_word[idx] for idx in sentence] for sentence in outputs]
+  return outputs
+
 
 
 def get_config():
@@ -156,44 +166,59 @@ def main(_):
   eval_config.batch_size = 1
 
   raw_data = reader.ptb_raw_data(FLAGS.data_path)
-  train_data, valid_data, test_data, _ = raw_data
+  train_data, valid_data, test_data, word_to_id, id_to_word = raw_data
+  train_data = ptb_producer(train_data, config.batch_size)
+  valid_data = ptb_producer(valid_data, config.batch_size)
+  test_data  = ptb_producer(test_data, eval_config.batch_size)
 
   with tf.Graph().as_default():
     initializer = tf.random_uniform_initializer(-config.init_scale,
                                                 config.init_scale)
 
     with tf.name_scope("Train"):
-      train_input = PTBInput(config=config, data=train_data, name="TrainInput")
       with tf.variable_scope("Model", reuse=None, initializer=initializer):
-        m = VRAE(is_training=True, config=config, input_=train_input)
+        m = VRAE(is_training=True, config=config)
       tf.scalar_summary("Training Loss", m.cost)
 
     with tf.name_scope("Valid"):
-      valid_input = PTBInput(config=config, data=valid_data, name="ValidInput")
       with tf.variable_scope("Model", reuse=True, initializer=initializer):
-        mvalid = VRAE(is_training=False, config=config, input_=valid_input)
+        mvalid = VRAE(is_training=False, config=config)
       tf.scalar_summary("Validation Loss", mvalid.cost)
 
     with tf.name_scope("Test"):
-      test_input = PTBInput(config=eval_config, data=test_data, name="TestInput")
       with tf.variable_scope("Model", reuse=True, initializer=initializer):
-        mtest = VRAE(is_training=False, config=eval_config,
-                         input_=test_input)
+        mtest = VRAE(is_training=False, config=eval_config)
 
     sv = tf.train.Supervisor(logdir=FLAGS.save_path)
     with sv.managed_session() as session:
       for i in range(config.max_max_epoch):
-        m.assign_lr(session, config.learning_rate * lr_decay)
+        KL_rate = (i > 3 ? (i - 3)*0.1 : 0)
+        m.assign_KL_rate(session, KL_rate)
 
-        print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
-        train_perplexity = run_epoch(session, m, eval_op=m.train_op,
-                                     verbose=True)
-        print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
-        valid_perplexity = run_epoch(session, mvalid)
-        print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
+        train_costs, train_KL_term, train_reconstruction_cost = run_epoch(
+          session, m)
+        print("Epoch: %d Train costs: %.3f" % (i + 1, train_costs))
+        print("Epoch: %d Train KL divergence: %.3f" % (i + 1, train_KL_term))
+        print("Epoch: %d Train reconstruction costs: %.3f"
+          % (i + 1, train_reconstruction_cost))
+        valid_costs, valid_KL_term, valid_reconstruction_cost = run_epoch(
+          session, mvalid, train_data)
+        print("Epoch: %d Valid costs: %.3f" % (i + 1, valid_costs))
+        print("Epoch: %d Valid KL divergence: %.3f" % (i + 1, valid_KL_term))
+        print("Epoch: %d Valid reconstruction costs: %.3f"
+          % (i + 1, valid_reconstruction_cost))
 
-      test_perplexity = run_epoch(session, mtest)
-      print("Test Perplexity: %.3f" % test_perplexity)
+      test_costs, test_KL_term, test_reconstruction_cost = run_epoch(session, mtest)
+      print("Epoch: %d Test costs: %.3f" % (i + 1, test_costs))
+      print("Epoch: %d Test KL divergence: %.3f" % (i + 1, test_KL_term))
+      print("Epoch: %d Test reconstruction costs: %.3f"
+        % (i + 1, test_reconstruction_cost))
+      sampling_outputs = sampling(session, mtest, id_to_word)
+      print("sampling outputs: ", sampling_outputs)
+      reconstruct_inputs = ["I am hungry."]
+      reconstruct_outputs = reconstruct(session, mtest, reconstruct_inputs, word_to_id, id_to_word)
+      print("reconstruct outputs: ", reconstruct_outputs)
+
 
       if FLAGS.save_path:
         print("Saving model to %s." % FLAGS.save_path)

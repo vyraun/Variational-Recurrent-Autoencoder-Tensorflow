@@ -18,8 +18,7 @@ class VRAE(object):
   def __init__(
     self,
     is_training,
-    config,
-    input_):
+    config):
 
     self._input = input_
     self._is_training = is_training
@@ -28,19 +27,22 @@ class VRAE(object):
     for key in config:
       setattr(self, '_' + key, config[key])
 
-    input_data = self._input.input_data
-    self._batch_size, self._seq_len = input_data.shape
-    input_data = tf.convert_to_tensor(input_data,
-      name="input_data", dtype=data_type())
+    self._batch_size = batch_size = tf.placeholder(tf.int32)
+    self._seq_len = seq_len = tf.placeholder(tf.int32)
+    input_data = tf.placeholder(data_type(),
+      shape=(batch_size, seq_len))
+
     with tf.variable_scope("enc"):
       enc_mean, enc_stddev = encoder(input_data)
     with tf.variable_scope('dec'):
       outputs = decoder(enc_mean, enc_stddev)
 
-    num_unit_loss = self._seq_len * self._batch_size
-    loss = (self._KL_rate * get_KL_term(enc_mean, enc_stddev) +
-    get_reconstruction_cost(outputs, input_data))/num_unit_loss
-    self._cost = cost = loss
+    unit_per_minibatch = self._seq_len * self._batch_size
+    self._KL_term = get_KL_term(enc_mean, enc_stddev)
+    self._reconstruction_cost = get_reconstruction_cost(outputs, input_data)
+    cost = self._KL_rate * self._KL_term + self._reconstruction_cost
+    self._cost = cost
+    loss = cost / unit_per_minibatch
 
     if not self._is_training:
       return
@@ -48,8 +50,12 @@ class VRAE(object):
     tvars = tf.trainable_variables()
     grads, _ = tf.clip_by_global_norm(tf.gradients(cost, tvars),
                                       self._max_grad_norm)
-    self._optimizer = tf.train.GradientDescentOptimizer(self._learning_rate)
+    self._optimizer = tf.train.AdamOptimizer(self._learning_rate)
     .minimize(loss)
+
+    self._new_KL_rate = tf.placeholder(
+        tf.float32, shape=[], name="new_KL_rate")
+    self._KL_rate_update = tf.assign(self._KL_rate, self._new_KL_rate)
 
   def get_KL_term(self, mean, stddev, epsilon=1e-8):
     '''KL_divergence
@@ -174,16 +180,39 @@ class VRAE(object):
       [self._batch_size, self._seq_len, self._dec_dim])
     return outputs
 
-  def assign_lr(self, session, lr_value):
-    session.run(self._lr_update, feed_dict={self._new_lr: lr_value})
+  def assign_KL_rate(self, session, KL_rate):
+    session.run(self._KL_rate_update, feed_dict={self._new_KL_rate: KL_rate})
+
+  def generate(self, session, mean=None, stddev=None): #generate output by sampling from latent space
+    outputs = self.decoder(self, mean, stddev)
+    outputs = session.run(outputs)
+    return outputs
+
+  def reconstruct(self, session, input_data): #generate output by sampling from latent space
+    mean, stddev = self.encoder(self, input_data)
+    self._seq_len = input_data.shape[1]
+    outputs = self.decoder(self, mean, stddev)
+    return session.run(outputs)
 
   @property
   def input(self):
     return self._input
 
   @property
+  def optimizer(self):
+    return self._optimizer
+
+  @property
   def initial_state(self):
     return self._enc_initial_state
+
+  @property
+  def KL_term(self):
+    return self._KL_term
+
+  @property
+  def reconstruction_cost(self):
+    return self._reconstruction_cost
 
   @property
   def cost(self):
@@ -191,10 +220,4 @@ class VRAE(object):
 
   @property
   def lr(self):
-    return self._lr
-
-  @property
-  def train_op(self):
-    return self._train_op
-
-
+    return self._learning_rate
