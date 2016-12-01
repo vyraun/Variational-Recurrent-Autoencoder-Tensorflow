@@ -4,21 +4,21 @@ from __future__ import print_function
 
 import time
 
+import re
 import numpy as np
 import tensorflow as tf
 
 from model import VRAE
 
-from tensorflow.models.rnn.ptb import reader #penn treebank
 
 
 flags = tf.flags
 logging = tf.logging
 
 flags.DEFINE_string(
-    "model", "small",
+    "model", "medium",
     "A type of model. Possible options are: small, medium, large.")
-flags.DEFINE_string("data_path", "ptb",
+flags.DEFINE_string("data_path", "cts_TC_l5.txt",
                     "Where the training/test data is stored.")
 flags.DEFINE_string("save_path", "models",
                     "Model output directory.")
@@ -59,7 +59,7 @@ class MediumConfig(object):
   max_max_epoch = 39
   keep_prob = 0.5
   lr_decay = 0.8
-  batch_size = 20
+  batch_size = 32
   vocab_size = 10000
 
 
@@ -109,11 +109,11 @@ def run_epoch(session, model, data):
   }
   if model.is_training:
     fetches["optimizer"] = model.optimizer
+  if not model.is_training:
+    fetches["outputs"] = model.outputs
 
   for batch in data:
-    batch_size, seq_len = batch.shape
-    feed_dict = {batch_size:batch_size, seq_len: seq_len,
-      input_data: batch}
+    feed_dict = {input_data: batch}
     vals = session.run(fetches, feed_dict=feed_dict)
     KL_term = vals["KL_term"]
     reconstruction_cost = vals["reconstruction_cost"]
@@ -121,27 +121,41 @@ def run_epoch(session, model, data):
     costs += cost
     KL_terms += KL_term
     reconstruction_costs = reconstruction_cost
+    if not is_training:
+      print(fetches["outputs"])
+
 
   return costs, KL_terms, reconstruction_costs
 
 def sampling(session, model, id_to_word):
+  model._batch_size = 1
   outputs = model.generate(session)
-  outputs = np.transpose(outputs)
   outputs = outputs.tolist()
   outputs = [[id_to_word[word] for word in sentence] for sentence in outputs]
   return outputs
 
-def reconstruct(session, model, outputs, word_to_id, id_to_word):
-  inputs = [[word_to_id[word] for word in sentence] for sentence in inputs]
-  input_data = tf.convert_to_tensor(inputs)
-  input_data = np.transpose(input_data)
-  outputs = model.reconstruct(session, input_data)
-  outputs = np.transpose(outputs)
+def linear_interpolate(session, model, start_pt, end_pt, num_pts, id_to_word):
+  model._batch_size = 1
+  pts = []
+  for s, e in zip(start_pt.tolist(),end_pt.tolist()):
+    pts.append(np.linspace(s, e, num_pts))
+
+  pts = np.array(pts)
+  pts = pts.T
+  outputs = []
+  for pt in pts:
+    outputs.append(model.generate(session, mean=pt, stddev=0))
   outputs = outputs.tolist()
-  outputs = [[id_to_word[idx] for idx in sentence] for sentence in outputs]
+  outputs = [[id_to_word[word] for word in sentence] for sentence in outputs]
   return outputs
 
-
+def reconstruct(session, model, seq_input, word_to_id, id_to_word):
+  seq_input = [word_to_id[word] for word in seq_input]
+  input_data = tf.convert_to_tensor(seq_input)
+  seq_output = model.reconstruct(session, input_data)
+  seq_output = seq_output.tolist()
+  seq_output = [id_to_word[idx] for idx in seq_output]
+  return seq_output
 
 def get_config():
   if FLAGS.model == "small":
@@ -155,21 +169,48 @@ def get_config():
   else:
     raise ValueError("Invalid model: %s", FLAGS.model)
 
+def char_index_mapping(text):
+  print('corpus length:', len(text))
+  chars = sorted(list(set(text)))
+  print('total chars:', len(chars))
+  char_indices = dict((c, i) for i, c in enumerate(chars))
+  indices_char = dict((i, c) for i, c in enumerate(chars))
+  return char_indices, indices_char, len(chars)
+
+def get_batch_from_seq_list(seq_list, batch_size):
+  '''
+  Args:
+    seq_list: list of sequences with sequence length seq_len
+  Returns:
+    list of np.array with shape (batch_size, seq_len)
+  '''
+  list_of_batches = []
+  batch_idx = 0
+  while batch_idx < len(seq_list):
+    list_of_batches.append(np.array(seq_list[batch_idx:batch_idx + batch_size]))
+    batch_idx += batch_size
+  return list_of_batches
 
 def main(_):
   if not FLAGS.data_path:
     raise ValueError("Must set --data_path to PTB data directory")
 
-
   config = get_config()
-  eval_config = get_config()
+  batch_size = config.batch_size
+
+
+  text = open(FLAGS.data_path).read()
+  seq_list = re.split("[，。\n]+", text)
+  cts_seq_len = 5
+  word_to_id, id_to_word, num_chars = char_index_mapping(text)
+  ind_seq_list = [[word_to_id[char] for char in seq] for seq in seq_list]
+  data = get_batch_from_seq_list(ind_seq_list, config.batch_size)
+  config.vocab_size = num_chars
   eval_config.batch_size = 1
 
-  raw_data = reader.ptb_raw_data(FLAGS.data_path)
-  train_data, valid_data, test_data, word_to_id, id_to_word = raw_data
-  train_data = ptb_producer(train_data, config.batch_size)
-  valid_data = ptb_producer(valid_data, config.batch_size)
-  test_data  = ptb_producer(test_data, eval_config.batch_size)
+  data_split = (int(len(data) * 0.9) // (batch_size)) * batch_size
+  train_data = data[:data_split]
+  test_data = data[data_split:]
 
   with tf.Graph().as_default():
     initializer = tf.random_uniform_initializer(-config.init_scale,
@@ -177,48 +218,50 @@ def main(_):
 
     with tf.name_scope("Train"):
       with tf.variable_scope("Model", reuse=None, initializer=initializer):
-        m = VRAE(is_training=True, config=config)
+        m = VRAE(is_training=True, config=config, seq_len=cts_seq_len)
       tf.scalar_summary("Training Loss", m.cost)
 
-    with tf.name_scope("Valid"):
-      with tf.variable_scope("Model", reuse=True, initializer=initializer):
-        mvalid = VRAE(is_training=False, config=config)
-      tf.scalar_summary("Validation Loss", mvalid.cost)
-
     with tf.name_scope("Test"):
-      with tf.variable_scope("Model", reuse=True, initializer=initializer):
-        mtest = VRAE(is_training=False, config=eval_config)
+      with tf.variable_scope("Model", reuse=None, initializer=initializer):
+        mtest = VRAE(is_training=True, config=config, seq_len=cts_seq_len)
+      tf.scalar_summary("Training Loss", mtest.cost)
 
     sv = tf.train.Supervisor(logdir=FLAGS.save_path)
     with sv.managed_session() as session:
       for i in range(config.max_max_epoch):
-        KL_rate = (i > 3 ? (i - 3)*0.1 : 0)
+        KL_rate = 0
+        if(i > 3):
+          KL_rate = (i - 3) * 0.1
         m.assign_KL_rate(session, KL_rate)
 
         train_costs, train_KL_term, train_reconstruction_cost = run_epoch(
-          session, m)
+          session, m, train_data)
         print("Epoch: %d Train costs: %.3f" % (i + 1, train_costs))
         print("Epoch: %d Train KL divergence: %.3f" % (i + 1, train_KL_term))
         print("Epoch: %d Train reconstruction costs: %.3f"
           % (i + 1, train_reconstruction_cost))
-        valid_costs, valid_KL_term, valid_reconstruction_cost = run_epoch(
-          session, mvalid, train_data)
-        print("Epoch: %d Valid costs: %.3f" % (i + 1, valid_costs))
-        print("Epoch: %d Valid KL divergence: %.3f" % (i + 1, valid_KL_term))
-        print("Epoch: %d Valid reconstruction costs: %.3f"
-          % (i + 1, valid_reconstruction_cost))
 
-      test_costs, test_KL_term, test_reconstruction_cost = run_epoch(session, mtest)
-      print("Epoch: %d Test costs: %.3f" % (i + 1, test_costs))
-      print("Epoch: %d Test KL divergence: %.3f" % (i + 1, test_KL_term))
-      print("Epoch: %d Test reconstruction costs: %.3f"
-        % (i + 1, test_reconstruction_cost))
-      sampling_outputs = sampling(session, mtest, id_to_word)
+        test_costs, test_KL_term, test_reconstruction_cost = run_epoch(
+          session, mtest, test_data)
+        print("Epoch: %d test costs: %.3f" % (i + 1, test_costs))
+        print("Epoch: %d test KL divergence: %.3f" % (i + 1, test_KL_term))
+        print("Epoch: %d test reconstruction costs: %.3f"
+          % (i + 1, test_reconstruction_cost))
+
+      sampled_cov = np.identity(config.latent_dim)
+      sampled_mean = np.zeros(config.latent_dim)
+      start_pt = np.random.multivariate_normal(sampled_mean, sampled_cov)
+      end_pt = np.random.multivariate_normal(sampled_mean, sampled_cov)      
+      sampling_outputs = linear_interpolate(session, mtest, start_pt, end_pt, 21, id_to_word)
       print("sampling outputs: ", sampling_outputs)
-      reconstruct_inputs = ["I am hungry."]
-      reconstruct_outputs = reconstruct(session, mtest, reconstruct_inputs, word_to_id, id_to_word)
-      print("reconstruct outputs: ", reconstruct_outputs)
-
+      reconstruct_inputs = seq_list[-32:]
+      reconstruct_outputs = []
+      for recon_input in reconstruct_inputs:
+        reconstruct_outputs.append(reconstruct(
+          session,mtest, reconstruct_input, word_to_id, id_to_word))
+      for recon_input, recon_output in zip(reconstruct_inputs, reconstruct_outputs):
+        print("reconstruct inputs: ", recon_input)
+        print("reconstruct outputs: ", recon_output)
 
       if FLAGS.save_path:
         print("Saving model to %s." % FLAGS.save_path)

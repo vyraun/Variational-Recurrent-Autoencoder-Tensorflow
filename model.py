@@ -18,31 +18,29 @@ class VRAE(object):
   def __init__(
     self,
     is_training,
-    config):
+    config,
+    seq_len):
 
-    self._input = input_
     self._is_training = is_training
-
+    self._seq_len = seq_len
 
     for key in config:
       setattr(self, '_' + key, config[key])
 
-    self._batch_size = batch_size = tf.placeholder(tf.int32)
-    self._seq_len = seq_len = tf.placeholder(tf.int32)
     input_data = tf.placeholder(data_type(),
-      shape=(batch_size, seq_len))
+      shape=(self._batch_size, seq_len))
 
     with tf.variable_scope("enc"):
       enc_mean, enc_stddev = encoder(input_data)
     with tf.variable_scope('dec'):
       outputs = decoder(enc_mean, enc_stddev)
 
-    unit_per_minibatch = self._seq_len * self._batch_size
+    self._outputs = outputs
     self._KL_term = get_KL_term(enc_mean, enc_stddev)
     self._reconstruction_cost = get_reconstruction_cost(outputs, input_data)
     cost = self._KL_rate * self._KL_term + self._reconstruction_cost
     self._cost = cost
-    loss = cost / unit_per_minibatch
+    loss = cost / self._batch_size
 
     if not self._is_training:
       return
@@ -50,8 +48,7 @@ class VRAE(object):
     tvars = tf.trainable_variables()
     grads, _ = tf.clip_by_global_norm(tf.gradients(cost, tvars),
                                       self._max_grad_norm)
-    self._optimizer = tf.train.AdamOptimizer(self._learning_rate)
-    .minimize(loss)
+    self._optimizer = tf.train.AdamOptimizer(self._learning_rate).minimize(loss)
 
     self._new_KL_rate = tf.placeholder(
         tf.float32, shape=[], name="new_KL_rate")
@@ -96,7 +93,6 @@ class VRAE(object):
       cell = tf.nn.MultiRNNCell([single_cell] * self._enc_num_layers,
         state_is_tuple=True)
 
-    enc_initial_state = cell.zero_state(self._batch_size, data_type())
     with tf.device("/cpu:0"):
       embedding = tf.get_variable("embedding",
         [self._vocab_size, self._embed_dim],
@@ -104,8 +100,7 @@ class VRAE(object):
       inputs = tf.nn.embedding_lookup(embedding, input_data)
 
     _, enc_final_state = tf.nn.dynamic_rnn(
-      cell, inputs, sequence_length=self._seq_len,
-        initial_state=enc_initial_state, dtype=data_type())
+      cell, inputs, sequence_length=self._seq_len, dtype=data_type())
 
     with tf.variable_scope('enc'):
       with tf.variable_scope('mean'):
@@ -185,14 +180,10 @@ class VRAE(object):
 
   def generate(self, session, mean=None, stddev=None): #generate output by sampling from latent space
     outputs = self.decoder(self, mean, stddev)
-    outputs = session.run(outputs)
-    return outputs
+    return session.run(outputs)
 
   def reconstruct(self, session, input_data): #generate output by sampling from latent space
-    mean, stddev = self.encoder(self, input_data)
-    self._seq_len = input_data.shape[1]
-    outputs = self.decoder(self, mean, stddev)
-    return session.run(outputs)
+    return session.run(self._outputs, feed_dict={input_data: input_data})
 
   @property
   def input(self):
@@ -205,6 +196,10 @@ class VRAE(object):
   @property
   def initial_state(self):
     return self._enc_initial_state
+
+  @property
+  def outputs(self):
+    return self._outputs
 
   @property
   def KL_term(self):
