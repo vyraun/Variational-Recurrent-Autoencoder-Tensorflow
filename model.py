@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 import time
+import pdb
 
 import numpy as np
 import tensorflow as tf
@@ -10,7 +11,7 @@ import tensorflow as tf
 
 
 def data_type():
-  return tf.float16 if FLAGS.use_fp16 else tf.float32
+  return tf.float32
 
 
 class VRAE(object):
@@ -24,20 +25,23 @@ class VRAE(object):
     self._is_training = is_training
     self._seq_len = seq_len
 
-    for key in config:
-      setattr(self, '_' + key, config[key])
+    for key in dir(config):
+          setattr(self, '_' + key, getattr(config, key))
 
-    input_data = tf.placeholder(data_type(),
-      shape=(self._batch_size, seq_len))
+    input_data = tf.placeholder(tf.int32,
+      shape=(self._batch_size, self._seq_len))
+    print(self._batch_size)
 
     with tf.variable_scope("enc"):
-      enc_mean, enc_stddev = encoder(input_data)
+      enc_mean, enc_stddev = self.encoder(input_data)
     with tf.variable_scope('dec'):
-      outputs = decoder(enc_mean, enc_stddev)
+      outputs = self.decoder(enc_mean, enc_stddev)
 
     self._outputs = outputs
-    self._KL_term = get_KL_term(enc_mean, enc_stddev)
-    self._reconstruction_cost = get_reconstruction_cost(outputs, input_data)
+    self._KL_rate = tf.Variable(0.0, trainable=False)
+    self._KL_term = self.get_KL_term(enc_mean, enc_stddev)
+    self._reconstruction_cost = tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(
+      outputs, input_data))
     cost = self._KL_rate * self._KL_term + self._reconstruction_cost
     self._cost = cost
     loss = cost / self._batch_size
@@ -51,7 +55,7 @@ class VRAE(object):
     self._optimizer = tf.train.AdamOptimizer(self._learning_rate).minimize(loss)
 
     self._new_KL_rate = tf.placeholder(
-        tf.float32, shape=[], name="new_KL_rate")
+      tf.float32, shape=[], name="new_KL_rate")
     self._KL_rate_update = tf.assign(self._KL_rate, self._new_KL_rate)
 
   def get_KL_term(self, mean, stddev, epsilon=1e-8):
@@ -69,7 +73,7 @@ class VRAE(object):
     '''
     return tf.reduce_sum(0.5 * (2 * tf.log(stddev + epsilon)
       - tf.square(mean) - tf.square(stddev) + 1.0))
-  def get_reconstruction_cost(ouput_tensor, target_tensor, epsilon=1e-8):
+  def get_reconstruction_cost(output_tensor, target_tensor, epsilon=1e-8):
     '''Reconstruction cost
         get reconstruction cost: log(p(x|z))
 
@@ -81,38 +85,52 @@ class VRAE(object):
       mini-batch cross entropy that sum over batches
       shape: scalar
     '''
+    print(output_tensor.get_shape())
+    print(target_tensor.get_shape())
     return tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(
       output_tensor, target_tensor))
 
   def encoder(self, input_data):
 
-    single_cell = tf.nn.rnn.BasicLSTMCell(self._enc_dim, forget_bias=1.0,
+    single_cell = tf.nn.rnn_cell.BasicLSTMCell(self._enc_dim, forget_bias=1.0,
       state_is_tuple=True)
     cell = single_cell
     if self._enc_num_layers > 1:
-      cell = tf.nn.MultiRNNCell([single_cell] * self._enc_num_layers,
+      cell = tf.nn.rnn_cell.MultiRNNCell([single_cell] * self._enc_num_layers,
         state_is_tuple=True)
 
+    enc_initial_state = cell.zero_state(self._batch_size, data_type())
+    print(cell.state_size)
     with tf.device("/cpu:0"):
       embedding = tf.get_variable("embedding",
         [self._vocab_size, self._embed_dim],
         dtype=data_type())
+      print(input_data.get_shape())
       inputs = tf.nn.embedding_lookup(embedding, input_data)
+      print(inputs.get_shape())
+      assert(cell.state_size[0] ==inputs.get_shape()[2])
 
-    _, enc_final_state = tf.nn.dynamic_rnn(
-      cell, inputs, sequence_length=self._seq_len, dtype=data_type())
+    outputs = []
+    state = enc_initial_state
+    with tf.variable_scope("RNN"):
+      for time_step in range(self._seq_len):
+        if time_step > 0: tf.get_variable_scope().reuse_variables()
+        (_, state) = cell(inputs[:, time_step, :], state)
+
+    enc_final_state_c, _ = state
+    print(enc_final_state_c.get_shape())
 
     with tf.variable_scope('enc'):
       with tf.variable_scope('mean'):
         w = tf.get_variable("w",[self._enc_dim, self._latent_dim],
           dtype=data_type())
         b = tf.get_variable("b", [self._latent_dim], dtype=data_type())
-        enc_mean = tf.matmul(enc_final_state, w) + b
+        enc_mean = tf.nn.relu(tf.matmul(enc_final_state_c, w) + b)
       with tf.variable_scope('stddev'):
         w = tf.get_variable("w",
           [self._enc_dim, self._latent_dim], dtype=data_type())
         b = tf.get_variable("b", [self._latent_dim], dtype=data_type())
-        enc_stddev = tf.matmul(enc_final_state, w) + b
+        enc_stddev = tf.nn.relu(tf.matmul(enc_final_state_c, w) + b)
 
     return enc_mean, enc_stddev
 
@@ -141,38 +159,46 @@ class VRAE(object):
     else:
       input_sample = mean + tf.mul(epsilon, stddev)
 
-    w = tf.get_variable("w", [self._latent_dim, self._dec_dim],
+    w_c = tf.get_variable("w_c", [self._latent_dim, self._dec_dim],
       dtype=data_type())
-    b = tf.get_variable("b", [self._dec_dim], dtype=data_type())
+    b_c = tf.get_variable("b_c", [self._dec_dim], dtype=data_type())
+    dec_initial_state_c = tf.nn.relu(tf.matmul(input_sample, w_c) + b_c)
 
-    dec_initial_state = tf.matmul(input_sample, w) + b
+    w_h = tf.get_variable("w_h", [self._latent_dim, self._dec_dim],
+      dtype=data_type())
+    b_h = tf.get_variable("b_h", [self._dec_dim], dtype=data_type())
+    dec_initial_state_h = tf.nn.relu(tf.matmul(input_sample, w_h) + b_h)
 
-    single_cell = tf.nn.rnn.BasicLSTMCell(self._dec_dim, forget_bias=1.0,
+    single_cell = tf.nn.rnn_cell.BasicLSTMCell(self._dec_dim, forget_bias=1.0,
       state_is_tuple=True)
     cell = single_cell
     if self._dec_num_layers > 1:
-      cell = tf.nn.MultiRNNCell([single_cell] * self._dec_num_layers,
+      cell = tf.nn.rnn_cell.MultiRNNCell([single_cell] * self._dec_num_layers,
         state_is_tuple=True)
 
-
+    outputs = []
     with tf.variable_scope("RNN"): #an RNNLM
-      state = dec_initial_state
-      vocab_input = tf.zeros([self._batch_size, self._vocab_size])
+      state = (dec_initial_state_c, dec_initial_state_h)
+      word_input = tf.zeros([self._batch_size, self._vocab_size])
       for time_step in range(self._seq_len):
         if time_step > 0:
           tf.get_variable_scope().reuse_variables()
         input_embedding = tf.get_variable("input_embedding",
           [self._vocab_size, self._enc_dim])
-        cell_input = tf.matmul(vocab_input, input_embedding)
-        (cell_output, state) = cell(cell_input, state)
+        if(time_step == 0):
+          cell_input = tf.zeros([self._batch_size, self._enc_dim])
+        else:
+          cell_input = tf.matmul(word_input, input_embedding)
+        cell_output, state = cell(cell_input, state)
         output_embedding = tf.get_variable("output_embedding",
           [self._enc_dim, self._vocab_size])
-        vocab_output = tf.matmul(cell_output, output_embebding)
-        #vocab_output = argmax(vocab_output)
-        outputs.append(cell_output)
+        word_output = tf.matmul(cell_output, output_embedding)
+        word_input = word_output
+        outputs.append(word_output)
 
-    outputs = tf.reshape(tf.concat(1, outputs),
-      [self._batch_size, self._seq_len, self._dec_dim])
+    concatenated_outputs = tf.concat(1, outputs)
+    outputs = tf.reshape(concatenated_outputs,
+      [self._batch_size, self._seq_len, self._vocab_size])
     return outputs
 
   def assign_KL_rate(self, session, KL_rate):

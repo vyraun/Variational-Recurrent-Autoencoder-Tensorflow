@@ -49,12 +49,12 @@ class MediumConfig(object):
   init_scale = 0.05
   learning_rate = 0.001
   max_grad_norm = 5
-  enc_num_layers = 2
+  enc_num_layers = 1
   enc_dim = 512
   embed_dim = 512
   latent_dim = 16
   dec_dim = 512
-  dec_num_layers = 2
+  dec_num_layers = 1
   max_epoch = 6
   max_max_epoch = 39
   keep_prob = 0.5
@@ -107,14 +107,15 @@ def run_epoch(session, model, data):
       "reconstruction_cost": model.reconstruction_cost,
       "cost": model.cost,
   }
-  if model.is_training:
+  if model._is_training:
     fetches["optimizer"] = model.optimizer
-  if not model.is_training:
+  if not model._is_training:
     fetches["outputs"] = model.outputs
 
   for batch in data:
-    feed_dict = {input_data: batch}
-    vals = session.run(fetches, feed_dict=feed_dict)
+    batch = tf.convert_to_tensor(batch, dtype=tf.int32)
+    print(batch.get_shape())
+    vals = session.run(fetches, feed_dict={input_data: batch})
     KL_term = vals["KL_term"]
     reconstruction_cost = vals["reconstruction_cost"]
     cost = vals["cost"]
@@ -128,14 +129,12 @@ def run_epoch(session, model, data):
   return costs, KL_terms, reconstruction_costs
 
 def sampling(session, model, id_to_word):
-  model._batch_size = 1
   outputs = model.generate(session)
   outputs = outputs.tolist()
   outputs = [[id_to_word[word] for word in sentence] for sentence in outputs]
   return outputs
 
 def linear_interpolate(session, model, start_pt, end_pt, num_pts, id_to_word):
-  model._batch_size = 1
   pts = []
   for s, e in zip(start_pt.tolist(),end_pt.tolist()):
     pts.append(np.linspace(s, e, num_pts))
@@ -196,6 +195,7 @@ def main(_):
     raise ValueError("Must set --data_path to PTB data directory")
 
   config = get_config()
+  eval_config = get_config()
   batch_size = config.batch_size
 
 
@@ -206,6 +206,7 @@ def main(_):
   ind_seq_list = [[word_to_id[char] for char in seq] for seq in seq_list]
   data = get_batch_from_seq_list(ind_seq_list, config.batch_size)
   config.vocab_size = num_chars
+  eval_config.vocab_size = num_chars
   eval_config.batch_size = 1
 
   data_split = (int(len(data) * 0.9) // (batch_size)) * batch_size
@@ -222,8 +223,8 @@ def main(_):
       tf.scalar_summary("Training Loss", m.cost)
 
     with tf.name_scope("Test"):
-      with tf.variable_scope("Model", reuse=None, initializer=initializer):
-        mtest = VRAE(is_training=True, config=config, seq_len=cts_seq_len)
+      with tf.variable_scope("Model", reuse=True, initializer=initializer):
+        mtest = VRAE(is_training=True, config=eval_config, seq_len=cts_seq_len)
       tf.scalar_summary("Training Loss", mtest.cost)
 
     sv = tf.train.Supervisor(logdir=FLAGS.save_path)
