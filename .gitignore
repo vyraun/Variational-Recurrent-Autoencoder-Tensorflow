@@ -1,3 +1,10 @@
 ptb
+reader.py
 reader.pyc
 models
+__pycache__
+tdb_ext
+tdb_ext.zip
+test.py
+useless
+setup_tdb.py
