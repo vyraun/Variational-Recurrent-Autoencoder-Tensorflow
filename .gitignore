@@ -1,6 +1,7 @@
 ptb
 reader.py
 reader.pyc
+model.pyc
 models
 __pycache__
 tdb_ext

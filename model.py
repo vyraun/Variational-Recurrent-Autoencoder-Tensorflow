@@ -33,7 +33,7 @@ class VRAE(object):
 
     with tf.variable_scope("encoder"):
       enc_mean, enc_stddev = self.encoder(self._input_data)
-    with tf.variable_scope('dec'):
+    with tf.variable_scope('decoder'):
       outputs = self.decoder(enc_mean, enc_stddev)
 
     self._outputs = outputs
