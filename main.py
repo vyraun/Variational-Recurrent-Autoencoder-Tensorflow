@@ -224,12 +224,12 @@ def main(_):
       with tf.variable_scope("Model", reuse=None, initializer=initializer):
         m = VRAE(is_training=True, config=config, seq_len=cts_seq_len)
       tf.scalar_summary("Training Loss", m.cost)
-    '''
+
     with tf.name_scope("Test"):
       with tf.variable_scope("Model", reuse=True, initializer=initializer):
         mtest = VRAE(is_training=True, config=eval_config, seq_len=cts_seq_len)
       tf.scalar_summary("Training Loss", mtest.cost)
-    '''
+      
     sv = tf.train.Supervisor(logdir=FLAGS.save_path)
     with sv.managed_session() as session:
       for i in range(config.max_max_epoch):
@@ -244,7 +244,7 @@ def main(_):
         print("Epoch: %d Train KL divergence: %.3f" % (i + 1, train_KL_term))
         print("Epoch: %d Train reconstruction costs: %.3f"
           % (i + 1, train_reconstruction_cost))
-        '''
+        
         test_costs, test_KL_term, test_reconstruction_cost = run_epoch(
           session, mtest, test_data)
         print("Epoch: %d test costs: %.3f" % (i + 1, test_costs))
@@ -266,7 +266,7 @@ def main(_):
       for recon_input, recon_output in zip(reconstruct_inputs, reconstruct_outputs):
         print("reconstruct inputs: ", recon_input)
         print("reconstruct outputs: ", recon_output)
-      '''
+      
       if FLAGS.save_path:
         print("Saving model to %s." % FLAGS.save_path)
         sv.saver.save(session, FLAGS.save_path, global_step=sv.global_step)
