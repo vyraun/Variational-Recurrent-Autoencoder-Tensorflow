@@ -28,20 +28,19 @@ class VRAE(object):
     for key in dir(config):
           setattr(self, '_' + key, getattr(config, key))
 
-    input_data = tf.placeholder(tf.int32,
+    self._input_data = tf.placeholder(tf.int32,
       shape=(self._batch_size, self._seq_len))
-    print(self._batch_size)
 
-    with tf.variable_scope("enc"):
-      enc_mean, enc_stddev = self.encoder(input_data)
+    with tf.variable_scope("encoder"):
+      enc_mean, enc_stddev = self.encoder(self._input_data)
     with tf.variable_scope('dec'):
       outputs = self.decoder(enc_mean, enc_stddev)
 
     self._outputs = outputs
-    self._KL_rate = tf.Variable(0.0, trainable=False)
+    self._KL_rate = tf.Variable(0.0, trainable=False, name="KL_rate")
     self._KL_term = self.get_KL_term(enc_mean, enc_stddev)
     self._reconstruction_cost = tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(
-      outputs, input_data))
+      outputs, self._input_data))
     cost = self._KL_rate * self._KL_term + self._reconstruction_cost
     self._cost = cost
     loss = cost / self._batch_size
@@ -85,8 +84,6 @@ class VRAE(object):
       mini-batch cross entropy that sum over batches
       shape: scalar
     '''
-    print(output_tensor.get_shape())
-    print(target_tensor.get_shape())
     return tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(
       output_tensor, target_tensor))
 
@@ -102,12 +99,10 @@ class VRAE(object):
     enc_initial_state = cell.zero_state(self._batch_size, data_type())
     print(cell.state_size)
     with tf.device("/cpu:0"):
-      embedding = tf.get_variable("embedding",
+      embedding = tf.get_variable("encoder_embedding",
         [self._vocab_size, self._embed_dim],
         dtype=data_type())
-      print(input_data.get_shape())
       inputs = tf.nn.embedding_lookup(embedding, input_data)
-      print(inputs.get_shape())
       assert(cell.state_size[0] ==inputs.get_shape()[2])
 
     outputs = []
@@ -118,9 +113,8 @@ class VRAE(object):
         (_, state) = cell(inputs[:, time_step, :], state)
 
     enc_final_state_c, _ = state
-    print(enc_final_state_c.get_shape())
 
-    with tf.variable_scope('enc'):
+    with tf.variable_scope('encoder_to_latent'):
       with tf.variable_scope('mean'):
         w = tf.get_variable("w",[self._enc_dim, self._latent_dim],
           dtype=data_type())
@@ -159,18 +153,22 @@ class VRAE(object):
     else:
       input_sample = mean + tf.mul(epsilon, stddev)
 
-    w_c = tf.get_variable("w_c", [self._latent_dim, self._dec_dim],
-      dtype=data_type())
-    b_c = tf.get_variable("b_c", [self._dec_dim], dtype=data_type())
-    dec_initial_state_c = tf.nn.relu(tf.matmul(input_sample, w_c) + b_c)
-
-    w_h = tf.get_variable("w_h", [self._latent_dim, self._dec_dim],
-      dtype=data_type())
-    b_h = tf.get_variable("b_h", [self._dec_dim], dtype=data_type())
-    dec_initial_state_h = tf.nn.relu(tf.matmul(input_sample, w_h) + b_h)
+    with tf.variable_scope('latent_to_decoder'):
+      with tf.variable_scope('cell_state'):
+        w = tf.get_variable("w", [self._latent_dim, self._dec_dim],
+          dtype=data_type())
+        b = tf.get_variable("b", [self._dec_dim], dtype=data_type())
+        xw_b = tf.matmul(input_sample, w) + b
+        dec_initial_state_c = tf.nn.relu(xw_b)
+      with tf.variable_scope('hidden_state'):
+        w = tf.get_variable("w", [self._latent_dim, self._dec_dim],
+          dtype=data_type())
+        b = tf.get_variable("b", [self._dec_dim], dtype=data_type())
+        xw_b = tf.matmul(input_sample, w) + b
+        dec_initial_state_h = tf.nn.relu(xw_b)
 
     single_cell = tf.nn.rnn_cell.BasicLSTMCell(self._dec_dim, forget_bias=1.0,
-      state_is_tuple=True)
+        state_is_tuple=True)
     cell = single_cell
     if self._dec_num_layers > 1:
       cell = tf.nn.rnn_cell.MultiRNNCell([single_cell] * self._dec_num_layers,
@@ -196,8 +194,7 @@ class VRAE(object):
         word_input = word_output
         outputs.append(word_output)
 
-    concatenated_outputs = tf.concat(1, outputs)
-    outputs = tf.reshape(concatenated_outputs,
+    outputs = tf.reshape(tf.concat(1, outputs),
       [self._batch_size, self._seq_len, self._vocab_size])
     return outputs
 
@@ -212,8 +209,8 @@ class VRAE(object):
     return session.run(self._outputs, feed_dict={input_data: input_data})
 
   @property
-  def input(self):
-    return self._input
+  def input_data(self):
+    return self._input_data
 
   @property
   def optimizer(self):

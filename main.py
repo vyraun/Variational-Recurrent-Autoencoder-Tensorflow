@@ -1,9 +1,12 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
 import time
 
+import codecs
 import re
 import numpy as np
 import tensorflow as tf
@@ -113,16 +116,16 @@ def run_epoch(session, model, data):
     fetches["outputs"] = model.outputs
 
   for batch in data:
-    batch = tf.convert_to_tensor(batch, dtype=tf.int32)
-    print(batch.get_shape())
-    vals = session.run(fetches, feed_dict={input_data: batch})
+    #batch = tf.convert_to_tensor(batch, dtype=tf.int32)
+    #print(batch.get_shape())
+    vals = session.run(fetches, feed_dict={model.input_data: batch})
     KL_term = vals["KL_term"]
     reconstruction_cost = vals["reconstruction_cost"]
     cost = vals["cost"]
     costs += cost
     KL_terms += KL_term
     reconstruction_costs = reconstruction_cost
-    if not is_training:
+    if not model._is_training:
       print(fetches["outputs"])
 
 
@@ -199,8 +202,8 @@ def main(_):
   batch_size = config.batch_size
 
 
-  text = open(FLAGS.data_path).read()
-  seq_list = re.split("[，。\n]+", text)
+  text = codecs.open(FLAGS.data_path, "r", encoding="utf-8").read()
+  seq_list = re.split(u"[，。\n]+", text)
   cts_seq_len = 5
   word_to_id, id_to_word, num_chars = char_index_mapping(text)
   ind_seq_list = [[word_to_id[char] for char in seq] for seq in seq_list]
@@ -221,12 +224,12 @@ def main(_):
       with tf.variable_scope("Model", reuse=None, initializer=initializer):
         m = VRAE(is_training=True, config=config, seq_len=cts_seq_len)
       tf.scalar_summary("Training Loss", m.cost)
-
+    '''
     with tf.name_scope("Test"):
       with tf.variable_scope("Model", reuse=True, initializer=initializer):
         mtest = VRAE(is_training=True, config=eval_config, seq_len=cts_seq_len)
       tf.scalar_summary("Training Loss", mtest.cost)
-
+    '''
     sv = tf.train.Supervisor(logdir=FLAGS.save_path)
     with sv.managed_session() as session:
       for i in range(config.max_max_epoch):
@@ -241,7 +244,7 @@ def main(_):
         print("Epoch: %d Train KL divergence: %.3f" % (i + 1, train_KL_term))
         print("Epoch: %d Train reconstruction costs: %.3f"
           % (i + 1, train_reconstruction_cost))
-
+        '''
         test_costs, test_KL_term, test_reconstruction_cost = run_epoch(
           session, mtest, test_data)
         print("Epoch: %d test costs: %.3f" % (i + 1, test_costs))
@@ -263,7 +266,7 @@ def main(_):
       for recon_input, recon_output in zip(reconstruct_inputs, reconstruct_outputs):
         print("reconstruct inputs: ", recon_input)
         print("reconstruct outputs: ", recon_output)
-
+      '''
       if FLAGS.save_path:
         print("Saving model to %s." % FLAGS.save_path)
         sv.saver.save(session, FLAGS.save_path, global_step=sv.global_step)
